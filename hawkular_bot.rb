@@ -2,6 +2,7 @@ require 'sinatra'
 require 'json'
 require 'rest_client'
 require 'uri'
+require 'base64'
 require_relative 'lib/hawkular_bot_utils'
 
 GITHUB_URL = 'https://api.github.com'.freeze
@@ -9,13 +10,13 @@ TRAVIS_URL = 'https://api.travis-ci.org'.freeze
 ENABLED_REPOS = ['hawkular/hawkular-services'].freeze
 
 post '/notifications' do
-  payload = request_body.fetch('payload', '')
+  payload = params[:payload]
   signature = request.env['HTTP_SIGNATURE']
   unless signature_is_valid signature, payload
     status 401
     return 'Invalid signature'
   end
-  notification = payload.to_json
+  notification = JSON.parse payload
   repo_slug = "#{notification['repository']['owner_name']}/#{notification['repository']['name']}"
   unless ENABLED_REPOS.include? repo_slug
     status 500
@@ -37,7 +38,7 @@ post '/notifications' do
   }
   build = JSON.parse(travis_client["builds/#{build_id}"].get(travis_headers))
   build_status = HawkularBotUtils.status_unknown
-  build['builds']['job_ids'].each do |job_id|
+  build['build']['job_ids'].each do |job_id|
     job_log = travis_client["jobs/#{job_id}/log"].get 'accept' => 'text/plain', 'accept-encoding' => 'gzip, deflate'
     job_status = HawkularBotUtils.ruby_test_status job_log
     build_status = job_status unless job_status == HawkularBotUtils.status_unknown
@@ -58,7 +59,7 @@ post '/notifications' do
 
   github_client = RestClient::Resource.new(GITHUB_URL)
   github_header = {
-    Authorization: "token #{github_token}"
+    Authorization: "token #{ENV['GITHUB_TOKEN']}"
   }
   github_comment_body = {
     body: github_message
@@ -71,11 +72,7 @@ def signature_is_valid(signature, payload)
   pkey.verify(OpenSSL::Digest::SHA1.new, Base64.decode64(signature), payload)
 end
 
-def request_body
-  request.body.read
-end
-
 def public_key
   client = RestClient::Resource.new(TRAVIS_URL)
-  client['config'].get['config']['notifications']['webhook']['public_key']
+  JSON.parse(client['config'].get)['config']['notifications']['webhook']['public_key']
 end

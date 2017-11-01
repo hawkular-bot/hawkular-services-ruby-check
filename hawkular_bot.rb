@@ -27,7 +27,7 @@ post '/notifications' do
     status 500
     return 'Only valid for pull-requests'
   end
-  pull = notification['pull_request_number']
+  commit = notification['commit']
 
   build_id = notification['id']
   travis_client = RestClient::Resource.new(TRAVIS_URL)
@@ -38,33 +38,40 @@ post '/notifications' do
   }
   build = JSON.parse(travis_client["builds/#{build_id}"].get(travis_headers))
   build_status = HawkularBotUtils.status_unknown
+  job_failed_id = nil
   build['build']['job_ids'].each do |job_id|
     job_log = travis_client["jobs/#{job_id}/log"].get 'accept' => 'text/plain', 'accept-encoding' => 'gzip, deflate'
     job_status = HawkularBotUtils.ruby_test_status job_log
     build_status = job_status unless job_status == HawkularBotUtils.status_unknown
-    break if build_status == HawkularBotUtils.status_failed
+    if build_status == HawkularBotUtils.status_failed
+      job_failed_id = job_id
+      break
+    end
   end
 
-  github_message = case build_status
-                   when :success
-                     'This PR seem to be working well with '\
-                     '[hawkular-client-ruby](https://github.com/hawkular/hawkular-client-ruby) :+1:.'
-                   when :failed
-                     'This PR potentially fails with '\
-                     '[hawkular-client-ruby](https://github.com/hawkular/hawkular-client-ruby).'
-                   else
-                     status 500
-                     return "Did not detect any Build status on #{repo_slug}"
-                   end
+  github_status = case build_status
+                  when :success
+                    {
+                      'state'       => 'success',
+                      'description' => 'The tests succeeded'
+                    }
+                  when :failed
+                    {
+                      'state'       => 'failure',
+                      'description' => 'The tests failed',
+                      'target_url'  => "https://travis-ci.org/#{repo_slug}/jobs/#{job_failed_id}"
+                    }
+                  else
+                    status 500
+                    return "Did not detect any Build status on #{repo_slug}"
+                  end
+  github_status['context'] = 'hawkular-client-tests/ruby'
 
   github_client = RestClient::Resource.new(GITHUB_URL)
   github_header = {
     Authorization: "token #{ENV['GITHUB_TOKEN']}"
   }
-  github_comment_body = {
-    body: github_message
-  }
-  github_client["repos/#{repo_slug}/issues/#{pull}/comments"].post(github_comment_body.to_json, github_header)
+  github_client["repos/#{repo_slug}/statuses/#{commit}"].post(github_status.to_json, github_header)
 end
 
 def signature_is_valid(signature, payload)
